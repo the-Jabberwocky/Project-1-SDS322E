@@ -1,0 +1,251 @@
+---
+title: "SDS322EProject1-tkm834"
+output: html_document
+date: "2023-10-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## An Investigation Into Steam Game Data 
+
+### Data Collection
+
+The digital game distribution service Steam contains a massive sample of video games released and played. 
+
+To investigate the trends in the video game industry, Steam data was collected from Steam Store Games (Clean dataset) by Nik Davis (https://www.kaggle.com/datasets/nikdavis/steam-store-games/data) which itself gained data from the Steam API and a third party website, SteamSpy API. Each row in this dataset corresponds to a unique game published on steam. Relevant variables include a unique game id (appid), the release date, genre and categories associated with the game.
+
+Additional data was aquired from Steam Player Data by Jack Olozaly (https://www.kaggle.com/datasets/jackogozaly/steam-player-data/data) which itself was pulled from the third party Steam Charts. Each observation represents player data per game per month, and variables include Average player numbers and peak player number,as well as App.ID, which can be used to join the two datasets by game.
+
+These datasets were chosen for their workability and comprehensivity, as well as direct ties to reputable source for the data.
+
+## Guiding Questions
+
+With the size of the data, the scope of the investigation must be narrowed to not be overwhelmed. Questions to investigate will include:
+
+- How does genre popularity change over time?
+- Do games in the same genre tend to share other traits, such as play style?
+- How do game prices vary? Do they vary differently within genres?
+
+
+### Read In Data
+```{r}
+library(tidyverse)
+library(magrittr)
+
+steamData <- read.csv("steam.csv")
+# Data from https://www.kaggle.com/datasets/nikdavis/steam-store-games
+playerNums <- read.csv("steam_charts.csv")
+# Data from https://www.kaggle.com/datasets/jackogozaly/steam-player-data/data
+```
+
+### Look at the Data
+
+Take a look at the data to understand object types and value formats
+
+```{r}
+# Peek at the steamdata
+glimpse(steamData)
+# Peek at Player Data
+glimpse(playerNums)
+```
+### Tidying the Data
+
+The goal of tidying the data is to get information into a workable format where each observation has its own row, and each variable its own column, and each value its own cell.
+
+The value appid is a unique identification code for a game, and as such, should not appear in multiple observations if the data is tidy.
+```{r}
+# count number of rows in steamData
+steamData %>% 
+  count()
+# cound number of rows in steamData where appid is unique
+steamData[!duplicated(steamData$appid), ] %>% 
+  count()
+```
+Because the dataset with duplicate appid values removed is the same length as the original, we know the original has no duplicate appid values.
+
+Within steamData, release_date will need to be coerced into a datetime object for later operations. Additionally, objects within columns like 'categories' and 'genres' should be changed into lists instead of strings, so they can easily be unnested later. The flattened data should be useful for visualization, but nested is easier to handle for joining.
+
+'Owners' is a range with the estimated upper and lower bounds of games owned. This should be separated into two columns. For investigation and visualization, the lower bound or midpoint will be the most useful, so additional column midpoint will be calculated
+
+```{r}
+# Identify columns that need to be turned into lists
+listsNeeded <- c("platforms","categories","genres","steamspy_tags")
+# Transform data to be easier to work with 
+steamDataClean <- steamData %>% 
+  # turn into date objects
+  mutate(release_date = as_date(release_date)) %>% 
+  # turnstrings into lists
+  mutate_at(listsNeeded,~as.list(str_split(.,";"))) %>% 
+  separate_wider_delim(owners,"-",
+                       names = c("ownerslowBound","ownersupperBound"))
+
+# Turn into datetime objects
+playerNumsClean <- playerNums %>% 
+  mutate(Month = parse_date_time(Month, "%B %Y"))
+```
+
+A possible issue in this data is that 'categories' and 'genre' contain variables similar to the ones within steamspy_tag. This is due to the first two variables being information from the steam store, the other from a platform called 'steamspy' which has information about steam games.It could be useful to merge these together, however tags do not differentiate between game type (multiplayer vs singleplayer) and genre (Action, Adventure, Casual, RPG, ect.) However, they do offer more detailed theme descriptors, for example, 'Sunless Seas' has genres of Adventure, Indie, and RPG, but has tags for Exploration, Survival, and Lovecraftian.
+
+## Joining/Merging
+
+Because the player numbers dataset contains only games that made the top 100 played from steam charts data, the joined dataset with player hour data will contain fewer games than the complete steamData (1000 games compared to 27075).However, there are more observations as gameplay data is recorded each moth. The joined dataset will be useful to examing trends in gameplay, but steamData can stand alone for investigating publishing trends.
+
+```{r}
+# Investigate rows that have no equivalent 
+playerNumsClean %>% 
+  anti_join(steamDataClean,join_by(App.ID == appid)) %>% 
+  sample_n(10)
+
+# Investigate the differences in amount of unique games
+playerNumsClean %>% 
+  summarise(numUnique = n_distinct(App.ID))
+steamDataClean %>% 
+  summarise(numUnique = n_distinct(appid))
+
+# Join the data
+topGames <- steamDataClean %>% 
+  # take only relevant columns
+  select(appid,name,categories,genres,steamspy_tags,release_date,ownerslowBound) %>% 
+  inner_join(playerNumsClean, join_by(appid == App.ID))
+```
+### Table statistics
+- steamDataClean observations: 27,075 entries  
+- playerNumsClean observations: 54,785 entries  
+- Joined observations(topGames): 43,639 entries  
+
+The datasets are joined on App ID (appid | App.ID), as the unique code indicates a game without needing to match character strings for names, which may not match perfectly. (such as & vs and) Other than game name and app id, all columns are unique to their dataset.
+
+It is important to note that while Month and release_date are both date objects, they *should not* be joined, as one indicates when the game was published, and the other indicates the month that the play numbers are associated with.
+
+## Examine Data
+
+#### Time Since Release
+A negative correlation is expected between days since release and number of players.
+
+```{r}
+# Create new variable, time since release, to measure popularity changes since release
+topGames <- topGames %>% 
+  mutate(time_since_release = difftime(Month,as.POSIXct(release_date), units = "days"))
+
+topGames %>% 
+  #Keep only recent games, as the Steam platform is recent
+  filter(release_date > 2015) %>% 
+  ggplot(aes(x = time_since_release,y = Avg..Players))+
+  geom_point(size = .05)+
+  labs(title = "Time since release vs Player numbers (Viz 1)", x = "Time Since Release (days)", y = "Average Number of Players")
+```
+The correlation between time since release and average number of players is not as clear as I was expecting. This may be due to the fact games will have different ranges of player numbers - AAA games may have more players on a bad day than and independent studio on their best day.
+
+#### Price Distributions
+```{r}
+# Look at distribution of prices 
+steamDataClean %>% 
+  ggplot(aes(y = price,x = ""))+
+  geom_violin()+
+  geom_boxplot(outlier.shape = NA, width = .1)+
+  # COntrol axis limits so the one $400 game doesn't mess up the graph
+  scale_y_continuous(limits = quantile(steamDataClean$price, c(0, 0.99)))+
+  labs(title = "Price Distribution of Steam Games (Viz 2)", y = "Price ($)")+
+  theme(axis.title.x = element_blank())
+
+# Look at distribution of prices by genre
+steamDataClean %>% 
+  unnest(genres) %>%
+  # Only info for the most common genres
+  filter(genres %in% 
+           (topGames %>% unnest(genres) %>% count(genres) %>% slice_max(n, n =10) %>%
+              pull(genres) ))%>%
+  ggplot(aes(y = price,x = genres))+
+  geom_boxplot(outlier.size = .01, width = .2)+
+  # COntrol axis limits so the one $400 game doesn't mess up the graph
+  scale_y_continuous(limits = quantile(steamDataClean$price, c(0, 0.99)))+
+  labs(title = "Price Distribution of Steam Games by Genre (Viz 3)", y = "Price ($)")+
+  theme(axis.title.x = element_blank())+
+  scale_x_discrete(guide = guide_axis(angle = 45))
+
+```
+The distribution of prices is heavily skewed right, with the majority of games (All non-outliers) costing between 0-15 dollars. Over 75% of games are under 10 dollars, and over 50% are under 5 dollars.
+
+Massively Multiplayer games tend to be cheaper, which makes sense as part of their appeal is a large player base to interact with. Lower prices would be an incentive to buy the game and contribute to it's community. Early Access, RPG, Simulation, and Strategy games skew farther right than the other genres.
+
+
+#### Genre Trends Over Time
+
+I expect the Action genre will be the most prevalent, and I expect number of players for all genres to spike at the beginning of the pandemic. 
+
+```{r}
+topGames %>%
+  unnest(genres) %>% 
+  # Select only the top 8 most common genres (by #of games)
+  filter(genres %in% 
+           (topGames %>% unnest(genres) %>% count(genres) %>% slice_max(n, n =8) %>%
+              pull(genres) ))%>% 
+  group_by(genres, Month) %>% 
+  summarise(numGames = n(),
+            avgPlayers = sum(Avg..Players)) %>% 
+  ggplot(aes(x = as.Date(Month), y = avgPlayers))+
+  geom_line(aes(color = genres))+
+  labs(title = "Average Number of Players Over Time, By Genre (Viz 4)", x = "Date", y = "Average Number of Players", color = "Genre")+
+  theme_minimal()+
+  scale_y_continuous(labels = scales::comma)+
+  scale_color_brewer(palette = "Set2")
+```
+
+The expected increase in average players around March of 2020 can be seen. However, there is an interesting feature around 2018 where only 3 genres spike (Action, Massively Multiplayer, and Adventure) My hypothesis is this is a result of a single popular game that has many hours of content available, and potentially inspired copy-cats. Alternatively, there could be an error in the recording of number of hours for a game with those genres.
+
+
+#### Play Type and Genre Trends
+
+Play type conventions in games can be tied with genre - the genre 'Massively Multiplier' is defined by the potential for interacting in a world with anyone else playing the game. I expect genres such as 'Indie' and 'Massively Multiplayer' to be the most strongly associated with a single play style, as they are not genres defined by a theme or setting, but rather a collection of conventions and common game mechanics, which can be limited by play type.
+
+```{r}
+# Goal: Investigate how proportion of single vs multiplayer game change within genres 
+steamDataClean %>%
+  # category is used instead of steamspy tags, as tags do not relaiably contain singleplayer/multiplayer tags
+  #flatten the dataset for visualization
+  unnest(categories) %>% 
+  # only retain relevant data
+  filter(categories %in% c("Multi-player","Single-player"))%>% 
+  unnest(genres) %>% 
+  # Keep only 10 most common genres (To make differences in grouped bar chart clearer)
+  filter(genres %in% 
+           (steamDataClean %>% unnest(genres) %>% count(genres) %>% slice_max(n, n =10) %>% pull(genres) )) %>% 
+  group_by(genres,categories) %>% 
+  #number of games for each genre/category combination
+  summarise(numGames = n()) %>% 
+  ggplot(aes(fill=categories, x=genres, y = numGames)) + 
+  # g
+    geom_bar(position="dodge",stat = "identity")+
+    scale_x_discrete(guide = guide_axis(angle = 45))+
+  labs(title = "Game Type Prevalance Across Top Genres - Clustered (Viz 5)", x = "Genre",y = "Number of Games")
+
+#Closer look at all genres, not just top 10, showing percentage
+steamDataClean %>% 
+  unnest(categories) %>% 
+  filter(categories %in% c("Multi-player","Single-player"))%>% 
+  unnest(genres) %>% 
+  group_by(genres,categories) %>% 
+  summarise(numGames = n()) %>% 
+  ggplot(aes(fill=categories, x=genres, y = numGames)) + 
+    geom_bar(position = "fill", stat = "identity") +
+    scale_x_discrete(guide = guide_axis(angle = 45))+
+  labs(title = "Game Type Prevalance Across Genres - Stacked Percentage (Viz 6) ", x = "Genre",y = "Number of Games")
+```
+
+The dominance of single-player games is very surprising, and the fact that the genre 'Massively Multiplayer" is not 100% multiplayer indicated games are likely double-labeled if they provide an option for both single and multi player, despite the primary game type. This means the results are less informative than I had hoped. The high total number of independent (Indie) games is not surprising, as the nature of the genre (independently published) means more are produced, as anyone who makes their own game that is not an established game dev company can be classified as Indie.
+
+## Discussion
+Through exploring this data, I learned that spikes in player numbers usually happen for games as a whole, not for a unique genre (Viz 4). I learned that genres can correspond to noticeably different price ranges (Viz 3), and that the option for single player in games is much more prevalent than I thought (Viz 6).
+
+The greatest challenge for me was finding and cleaning the data - it required much more time than I initially participated. I was also surprised by how much I learned from dealing with challenges that arise from real data. Visualizing anything specific required *a lot* of wrangling to make the variables needed. Working on this project also made me realize how many solutions and approaches can exist to get similar results - most questions posed on Stack Overflow had many solutions.
+
+
+#### Help Acknowlegements
+
+- Rotating Axes (https://stackoverflow.com/questions/1330989/rotating-and-spacing-axis-labels-in-ggplot2) 
+- Limit observations to top Categories (https://stackoverflow.com/questions/57175180/how-can-i-show-only-the-top-10-categories-and-values-in-geom-point-dot-plot) 
+- Understanding list-columns and nested data (https://dcl-prog.stanford.edu/list-columns.html#unnesting) 
+- Datetime Help (https://epirhandbook.com/en/working-with-dates.html)
+- How to change limits to deal with plotting extreme outliers (https://stackoverflow.com/questions/5677885/ignore-outliers-in-ggplot2-boxplot) 
